@@ -1,8 +1,12 @@
 use {
     super::schema::miners,
+    crate::wallet::*,
+    crate::DBPooledConnection,
+    diesel::result::Error,
+    diesel::{ExpressionMethods, Insertable, QueryDsl, Queryable, RunQueryDsl},
+    rand::Rng,
     serde::{Deserialize, Serialize},
     uuid::Uuid,
-    crate::DBPooledConnection,
 };
 
 // ------------------ JSON Payload (Rest)
@@ -58,23 +62,70 @@ impl MinerDAO {
     }
 }
 
-pub fn get_club_name(_address: Uuid, conn: &DBPooledConnection) -> String {
-    match fetch_wallet_by_id(_address, &conn) {
-        Some(matched_wallet) => matched_wallet.club_name,
-        None => "Club name not found".to_string(),
-    }
-}
+// pub fn get_club_name(_address: Uuid, conn: &DBPooledConnection) -> String {
+//     match wallet::fetch_wallet_by_id(_address, &conn) {
+//         Some(matched_wallet) => matched_wallet.club_name,
+//         None => "Club name not found".to_string(),
+//     }
+// }
+
 
 pub fn fetch_all_miners(conn: &DBPooledConnection) -> Vec<Miner> {
     use crate::schema::miners::dsl::*;
-    match miners.load::<MinerDAO>(conn) {
-        Ok(result) => {
-            result.into_iter().map(|m| {
-                let club_name = get_club_name(m.address, conn);
-                m.to_miner(club_name)
+    use crate::schema::wallets::dsl::*;
 
-            }).collect::<Vec<Miner>>()
-        },
+    match wallets
+        .inner_join(miners)
+        .load::<(WalletDAO, MinerDAO)>(conn)
+    {
+        Ok(result) => result
+            .into_iter()
+            .map(|(w, m)| m.to_miner(w.club_name))
+            .collect::<Vec<Miner>>(),
         Err(_) => vec![],
+    }
+}
+
+pub fn fetch_miner_by_id(_id: Uuid, conn: &DBPooledConnection) -> Option<Miner> {
+    use crate::schema::miners::dsl::*;
+    use crate::schema::wallets::dsl::*;
+    match wallets
+        .inner_join(miners)
+        .filter(id.eq(_id))
+        .load::<(WalletDAO, MinerDAO)>(conn) {
+        Ok(result) => match result.first() {
+            Some((w, m)) => {
+                Some(m.to_miner(w.club_name.clone()))
+            }
+            _ => None,
+        },
+
+        Err(_) => None,
+    }
+}
+
+pub fn create_new_miner(
+    new_miner_request: NewMinerRequest,
+    _address: Uuid,
+    conn: &DBPooledConnection,
+) -> Result<Miner, Error> {
+    use crate::schema::miners::dsl::*;
+    let new_miner_dao = MinerDAO {
+        id: Uuid::new_v4(),
+        address: _address,
+        nickname: new_miner_request.nickname,
+        hash_rate: rand::thread_rng().gen_range(20..100),
+        shares_mined: rand::thread_rng().gen_range(1..40),
+    };
+
+    match diesel::insert_into(miners)
+        .values(&new_miner_dao)
+        .execute(conn)
+    {
+        Ok(_) => match fetch_miner_by_id(new_miner_dao.id, conn){
+            Some(result) => Ok(result),
+            None => Err(Error::NotFound)
+        } 
+        Err(err) => Err(err),
     }
 }
